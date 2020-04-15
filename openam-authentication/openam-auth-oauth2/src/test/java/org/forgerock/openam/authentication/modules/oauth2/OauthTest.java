@@ -4,7 +4,11 @@ import static org.mockito.Mockito.*;
 import java.net.*;
 
 import javax.security.auth.login.LoginException;
+import com.iplanet.am.util.AdminUtils;
 import com.sun.identity.authentication.service.AuthD;
+import com.iplanet.services.naming.WebtopNaming;
+import com.iplanet.am.util.SystemProperties;
+import com.sun.identity.shared.Constants;
 
 import org.junit.Test;
 import org.junit.Before;
@@ -18,7 +22,7 @@ import org.powermock.core.classloader.annotations.PowerMockIgnore;
 import org.powermock.modules.junit4.PowerMockRunner;
 
 @RunWith(PowerMockRunner.class)
-@PrepareForTest({AuthD.class})
+@PrepareForTest({AdminUtils.class,SystemProperties.class})
 @PowerMockIgnore("javax.net.ssl.*")
 public class OauthTest{
 
@@ -26,10 +30,12 @@ public class OauthTest{
 
     @Before
     public void setup(){
-        PowerMockito.mockStatic(AuthD.class);
-        AuthD mockAuth = mock(AuthD.class);
-        when(AuthD.getAuth()).thenReturn(mockAuth);
-
+        PowerMockito.mockStatic(AdminUtils.class);
+        PowerMockito.mockStatic(SystemProperties.class);
+        //AuthD mockAuth = mock(AuthD.class);
+        when(AdminUtils.getAdminPassword()).thenReturn(new byte[10]);
+        when(SystemProperties.get(Constants.AM_NAMING_URL)).thenReturn("/");
+        WebtopNaming.initialize();
         mockRule = new WireMockRule(WireMockConfiguration
             .wireMockConfig()
             .dynamicPort()
