@@ -1,0 +1,10 @@
+{
+    "request": {
+        "method": "GET",
+        "url": "/get200Test"
+    },
+    "response": {
+        "status": 200,
+        "body": "GET Request OK"
+    }
+}

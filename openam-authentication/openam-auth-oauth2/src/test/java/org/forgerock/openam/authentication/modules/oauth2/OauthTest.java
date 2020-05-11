@@ -1,47 +1,56 @@
 package org.forgerock.openam.authentication.modules.oauth2;
 
 import static org.mockito.Mockito.*;
-import java.net.*;
-import java.util.Vector;
-import java.util.Hashtable;
+
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
-import java.util.Iterator;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.security.auth.Subject;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.Callback;
 import javax.naming.directory.ModificationItem;
+import java.security.AccessController;
+import java.security.Principal;
+import javax.servlet.ServletContext;
 
-import javax.security.auth.login.LoginException;
-import com.iplanet.am.util.AdminUtils;
 import com.sun.identity.authentication.service.AuthD;
-import com.iplanet.services.naming.WebtopNaming;
-import com.iplanet.am.util.SystemProperties;
-import com.sun.identity.shared.Constants;
-import com.sun.identity.sm.SMSObject;
-import com.sun.identity.sm.SMSException;
-import com.sun.identity.sm.SMSDataEntry;
-import com.sun.identity.sm.SMSEntry;
-import com.iplanet.sso.SSOToken;
-import com.iplanet.sso.SSOException;
-import com.iplanet.services.comm.client.PLLClient;
-import com.iplanet.services.comm.share.RequestSet;
-import com.iplanet.services.naming.share.NamingResponse;
-import com.sun.identity.authentication.share.AuthXMLTags;
-import com.sun.identity.security.AdminTokenAction;
-import com.sun.identity.sm.ServiceManager;
 import org.forgerock.guice.core.InjectorHolder;
 import com.iplanet.dpro.session.service.SessionService;
-import com.iplanet.dpro.session.Session;
-import com.iplanet.dpro.session.SessionID;
-import javax.servlet.http.HttpSession;
 import org.forgerock.openam.sso.providers.stateless.StatelessSessionFactory;
 import org.forgerock.openam.session.SessionCache;
 import com.iplanet.dpro.session.operations.ServerSessionOperationStrategy;
-import com.iplanet.dpro.session.operations.SessionOperations;
-import com.iplanet.dpro.session.share.SessionInfo;
 import org.forgerock.openam.session.SessionPollerPool;
-import com.iplanet.services.naming.NamingTableConfigurationFactory;
-import com.iplanet.sso.providers.dpro.SSOProviderImpl;
 import org.forgerock.openam.session.SessionCookies;
+import com.sun.identity.authentication.spi.AuthLoginException;
+import com.sun.identity.authentication.util.ISAuthConstants;
+import com.sun.identity.authentication.service.LoginStateCallback;
+import com.sun.identity.authentication.service.LoginState;
+import com.sun.identity.authentication.service.AuthUtils;
+import com.sun.identity.sm.SMSEntry;
+import com.sun.identity.sm.SMSObject;
+import com.iplanet.sso.SSOException;
+import com.iplanet.sso.SSOToken;
+import com.iplanet.sso.SSOTokenID;
+import com.sun.identity.sm.SMSDataEntry;
+import com.sun.identity.sm.SMSException;
+import com.iplanet.am.util.AdminUtils;
+import com.sun.identity.security.SystemAppTokenProvider;
+import com.sun.identity.security.AdminTokenAction;
+import com.sun.identity.authentication.service.SSOTokenPrincipal;
+import org.forgerock.openam.xui.XUIState;
+import com.sun.identity.shared.Constants;
+import com.iplanet.am.util.SystemProperties;
+import com.iplanet.sso.SSOTokenManager;
+import com.sun.identity.sm.CachedSubEntries;
+import org.forgerock.openam.cts.CTSPersistentStore;
+import com.iplanet.dpro.session.service.InternalSession;
 
 import org.junit.Test;
 import org.junit.Before;
@@ -58,171 +67,239 @@ import org.mockito.stubbing.Answer;
 import org.mockito.invocation.InvocationOnMock;
 
 @RunWith(PowerMockRunner.class)
-@PrepareForTest({AdminUtils.class,SystemProperties.class,ServiceManager.class,InjectorHolder.class,WebtopNaming.class,SSOProviderImpl.class,SMSEntry.class,AuthD.class})
+@PrepareForTest({InjectorHolder.class,AuthD.class,AuthUtils.class,AdminUtils.class,AdminTokenAction.class,SystemProperties.class,SSOTokenManager.class,CachedSubEntries.class})
 @PowerMockIgnore("javax.net.ssl.*")
 public class OauthTest{
 
+    private OAuth oauth;
+
     private WireMockRule mockRule;
+    private String httpBase;
 
     @Before
     public void setup() throws Exception{
+        //for AMLoginModule
         PowerMockito.mockStatic(AuthD.class);
-        PowerMockito.whenNew(AuthD.class).withNoArguments().thenReturn(PowerMockito.mock(AuthD.class));
-
-        SessionID sessionID = mock(SessionID.class);
-
-        Session session = mock(Session.class);
-        PowerMockito.whenNew(Session.class).withArguments(any(String.class)).thenReturn(session);
-        when(session.getID()).thenReturn(sessionID);
-        when(session.getProperty(eq("Principal"))).thenReturn("Principal");
-
-        SessionService sessionService = mock(SessionService.class);
-        when(sessionService.getAuthenticationSession(any(String.class),isNull(HttpSession.class))).thenReturn(session);
-
-        SessionInfo sessionInfo = new SessionInfo();
-        sessionInfo.setSessionType("application");
-        sessionInfo.setState("valid");
-
-        SessionOperations sessionOperations = mock(SessionOperations.class);
-        when(sessionOperations.refresh(any(Session.class),eq(true))).thenReturn(sessionInfo);
-
-        ServerSessionOperationStrategy sessionOperationStrategy = mock(ServerSessionOperationStrategy.class);
-        when(sessionOperationStrategy.getOperation(any(Session.class))).thenReturn(sessionOperations);
-
+        AuthD authD = PowerMockito.mock(AuthD.class);
+        PowerMockito.whenNew(AuthD.class).withNoArguments().thenReturn(authD);
+        PowerMockito.when(AuthD.getAuth()).thenReturn(authD);
         PowerMockito.mockStatic(InjectorHolder.class);
-        when(InjectorHolder.getInstance(eq(SessionService.class))).thenReturn(sessionService);
+        when(InjectorHolder.getInstance(eq(SessionService.class))).thenReturn(mock(SessionService.class));
         when(InjectorHolder.getInstance(eq(StatelessSessionFactory.class))).thenReturn(mock(StatelessSessionFactory.class));
         when(InjectorHolder.getInstance(eq(SessionCache.class))).thenReturn(mock(SessionCache.class));
-        when(InjectorHolder.getInstance(eq(ServerSessionOperationStrategy.class))).thenReturn(sessionOperationStrategy);
+        when(InjectorHolder.getInstance(eq(ServerSessionOperationStrategy.class))).thenReturn(mock(ServerSessionOperationStrategy.class));
         when(InjectorHolder.getInstance(eq(SessionPollerPool.class))).thenReturn(mock(SessionPollerPool.class));
         when(InjectorHolder.getInstance(eq(SessionCookies.class))).thenReturn(mock(SessionCookies.class));
-    /*
+        when(InjectorHolder.getInstance(eq(CTSPersistentStore.class))).thenReturn(mock(CTSPersistentStore.class));
+
+        //for OAuth process()
+        when(InjectorHolder.getInstance(eq(XUIState.class))).thenReturn(mock(XUIState.class));
+
+        oauth = new OAuth();
+
+
+   
+        //Start Wire Mocka
         mockRule = new WireMockRule(WireMockConfiguration
             .wireMockConfig()
             .dynamicPort()
             .usingFilesUnderDirectory("src/test/java/org/forgerock/openam/authentication/modules/oauth2")
             );
         mockRule.start();
+        httpBase = "http://localhost:"+mockRule.port();
 
-        String httpBase = "http://localhost:"+mockRule.port();
-*/
-/*
-        PowerMockito.mockStatic(AdminUtils.class);
-        when(AdminUtils.getAdminPassword()).thenReturn("p@ssw0rd".getBytes());
-        when(AdminUtils.getAdminDN()).thenReturn("cn=dsameuser,ou=DSAME Users,dc=openam,dc=forgerock,dc=org");
-
-        PowerMockito.mockStatic(SystemProperties.class);
-        when(SystemProperties.isServerMode()).thenReturn(true);
-        when(SystemProperties.get(eq(AdminTokenAction.AMADMIN_MODE))).thenReturn("ldap location");
-        when(SystemProperties.get(Constants.SDK_GLOBAL_CACHE_PROPERTY,"true")).thenReturn("true");
-        when(SystemProperties.get("com.sun.identity.sm.sms_object_class_name","com.sun.identity.sm.ldap.SMSLdapObject"))
-            .thenReturn(MockSMSObject.class.getName());
-        when(SystemProperties.get(eq(Constants.AM_NAMING_URL))).thenReturn("http://localhost");
-//        when(SystemProperties.get(eq(SMSEntry.DB_PROXY_ENABLE))).thenReturn("true");
-//        when(SystemProperties.get(SystemProperties.CONFIG_PATH)).thenReturn("./src/test/resource/");
-
-        PowerMockito.mockStatic(ServiceManager.class);
-        when(ServiceManager.getBaseDN()).thenReturn("ldap location");
-        PowerMockito.when(ServiceManager.class,"getVersion",eq("iPlanetAMProviderConfigService")).thenReturn("1.1");
-        PowerMockito.when(ServiceManager.class,"getVersion",nullable(String.class)).thenReturn("1.0");
-        PowerMockito.when(ServiceManager.class,"getCacheIndex",any(String.class),any(String.class)).thenReturn("cache");
-        PowerMockito.when(ServiceManager.class,"getServiceNameDN",any(String.class),eq("1.0")).thenReturn("ou=1.0,ou=sunidentityrepositoryservice,ou=services,dc=openam,dc=forgerock,dc=org");
-
-
-        NamingTableConfigurationFactory.NamingTableConfiguration config = mock(NamingTableConfigurationFactory.NamingTableConfiguration.class);
-
-        NamingTableConfigurationFactory namingTableConfigFactory = mock(NamingTableConfigurationFactory.class);
-        PowerMockito.whenNew(NamingTableConfigurationFactory.class).withNoArguments().thenReturn(namingTableConfigFactory);
-        when(namingTableConfigFactory.getConfiguration(any(Hashtable.class))).thenReturn(config);
-
-        PowerMockito.mockStatic(WebtopNaming.class);
-        PowerMockito.when(WebtopNaming.class,"getNamingTable",any(URL.class)).thenReturn(new Hashtable());
-
-        SSOToken ssoToken = mock(SSOToken.class);
-
-        SSOProviderImpl ssoProviderImpl = PowerMockito.mock(SSOProviderImpl.class);
-        PowerMockito.whenNew(SSOProviderImpl.class).withNoArguments().thenReturn(ssoProviderImpl);
-        when(ssoProviderImpl.createSSOToken(any(String.class))).thenReturn(ssoToken);
-/*
-        SMSEntry smsMock = mock(SMSEntry.class);
-        PowerMockito.mockStatic(SMSEntry.class);
-        PowerMockito.whenNew(SMSEntry.class).withArguments(any(SSOToken.class),any(String.class)).thenReturn(smsMock);
-*/
     }
 
     @Test
-    public void getContentStreamByGETTest() throws Exception{
-        OAuth oauth = new OAuth();
-        //oauth.getContentStreamByGET("http://localhost:"+mockRule.port()+"/test",null,null);
-        HttpURLConnection con1 = (HttpURLConnection)( new URL("http://localhost:"+mockRule.port()+"/hoge.html").openConnection());
-        Assert.assertEquals(con1.getResponseCode(),400);
-        HttpURLConnection con2 = (HttpURLConnection)( new URL("http://localhost:"+mockRule.port()+"/hage.html").openConnection());
-        Assert.assertEquals(con2.getResponseCode(),500);
-        HttpURLConnection con3 = (HttpURLConnection)( new URL("http://localhost:"+mockRule.port()+"/hoge.html?test1=1&test2=2").openConnection());
-        Assert.assertEquals(con3.getResponseCode(),300);
-        HttpURLConnection con4 = (HttpURLConnection)( new URL("http://localhost:"+mockRule.port()+"/hoge.html?test1=a&test2=2").openConnection());
-        Assert.assertEquals(con4.getResponseCode(),301);
+    public void processTest_LoginStart() throws Exception{
+
+        //for AuthClientUtils
+        System.setProperty("com.sun.identity.sm.sms_object_class_name",SMSObjectMock.class.getName());
+        PowerMockito.mockStatic(AdminUtils.class);
+        when(AdminUtils.getAdminPassword()).thenReturn("password".getBytes());
+        when(AdminUtils.getAdminDN()).thenReturn("/");
+        SSOToken ssoToken = mock(SSOToken.class);
+        when(ssoToken.getPrincipal()).thenReturn(new SSOTokenPrincipal("dc=openam,dc=forgerock,dc=org"));
+        when(ssoToken.getTokenID()).thenReturn(mock(SSOTokenID.class));
+        AdminTokenAction adminTokenAction = mock(AdminTokenAction.class);
+        when(adminTokenAction.run()).thenReturn(ssoToken);
+        PowerMockito.mockStatic(AdminTokenAction.class);
+        when(AdminTokenAction.getInstance()).thenReturn(adminTokenAction);
+        SSOTokenManager ssoTokenManager = PowerMockito.mock(SSOTokenManager.class);
+        PowerMockito.doNothing().when(ssoTokenManager).validateToken(any(SSOToken.class)); //.doNothing();
+        PowerMockito.mockStatic(SSOTokenManager.class);
+        PowerMockito.when(SSOTokenManager.getInstance()).thenReturn(ssoTokenManager);
+//        PowerMockito.mockStatic(SMSEntry.class);
+//        PowerMockito.when(SMSEntry.getRootSuffix()).thenReturn("/");
+        
+
+        //for OAuth.process
+        HashMap options = new HashMap<>();
+        HashSet<String> optionsValue = new HashSet<String>();
+        optionsValue.add("test=test");
+        optionsValue.add("scope=uid mail");
+        options.put(OAuthParam.KEY_ACCOUNT_MAPPER_CONFIG,optionsValue);
+        options.put(OAuthParam.KEY_ACCOUNT_MAPPER,optionsValue);
+        options.put(OAuthParam.KEY_ATTRIBUTE_MAPPER_CONFIG,optionsValue);
+        options.put(OAuthParam.KEY_ATTRIBUTE_MAPPER,optionsValue);
+        options.put(OAuthParam.KEY_CLIENT_ID, optionsValue);
+        options.put(OAuthParam.KEY_CLIENT_SECRET, optionsValue);
+        options.put(OAuthParam.KEY_AUTH_SERVICE, optionsValue);
+        options.put(OAuthParam.KEY_TOKEN_SERVICE, optionsValue);
+        options.put(OAuthParam.KEY_PROFILE_SERVICE, optionsValue);
+        options.put(OAuthParam.KEY_MAP_TO_ANONYMOUS_USER_FLAG, optionsValue);
+        oauth.initialize(new Subject(),
+            new CallbackHandler(){
+                public void handle(Callback[] callbacks){
+                    LoginStateCallback loginStateCallback = (LoginStateCallback)callbacks[0];
+                    LoginState loginState = mock(LoginState.class);
+                    when(loginState.getSession()).thenReturn(mock(InternalSession.class));
+                    when(loginState.getHttpServletRequest()).thenReturn(mock(HttpServletRequest.class));
+                    when(loginState.getHttpServletResponse()).thenReturn(mock(HttpServletResponse.class));
+                    when(loginState.getFileName(any(String.class))).thenReturn("/OAuth.xml");
+                    loginStateCallback.setLoginState(loginState);
+                }
+            },
+            new HashMap(),
+            options);
+        System.setProperty(Constants.SMS_ENABLE_DB_NOTIFICATION,"true");
+        System.setProperty(AdminTokenAction.AMADMIN_MODE,"false");
+        PowerMockito.when(SystemProperties.isServerMode()).thenReturn(true);
+        PowerMockito.mockStatic(CachedSubEntries.class);
+        PowerMockito.when(CachedSubEntries.getInstanceIfCached(any(SSOToken.class),any(String.class),any(boolean.class))).thenReturn(mock(CachedSubEntries.class));
+
+        //Test
+        Assert.assertEquals(oauth.process(null,ISAuthConstants.LOGIN_START),100); //OAuthParam.GET_OAUTH_TOKEN_STATE);
     }
 
-    public static class MockSMSObject extends SMSObject{
+    @Test
+    public void getContentStreamByGETTest_200() throws Exception{
+        InputStream is = oauth.getContentStreamByGET(httpBase + "/get200Test",null,null);
+        Assert.assertEquals(inputStreamRead(is),"GET Request OK");
+    }
+    @Test
+    public void getContentStreamByGETTest_404() throws Exception{
+        try{
+            InputStream is2 = oauth.getContentStreamByGET("http://localhost:"+mockRule.port()+"/test2",null,null);
+        }catch(AuthLoginException e){
+            Assert.assertEquals(e.getMessage(),"Authentication failed because the remote server responded with an HTTP error code 404");
+        }
+    }
 
-        public String getAMSdkBaseDN(){
+    /**
+     * read input stream
+     */
+    private String inputStreamRead(java.io.InputStream is) throws Exception{
+        StringBuffer buf = new StringBuffer();
+        InputStreamReader reader= null;
+        BufferedReader br = null;
+        try{
+            reader = new InputStreamReader(is);
+            br = new BufferedReader(reader);
+            String str = null;
+            while( (str = br.readLine()) != null ){
+                if(buf.length() != 0 ){
+                    buf.append("\n");
+                }
+                buf.append(str);
+            }
+        }finally{
+            if(is != null ){
+                is.close();
+                reader.close();
+                br.close();
+            }
+        }
+        return buf.toString();
+    }
+
+    public static class SMSObjectMock extends SMSObject{
+        @Override
+        public Map<String, Set<String>> read(SSOToken token, String objName) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+            return new HashMap<>();
+        }
+
+        @Override
+        public void create(SSOToken token, String objName, Map attributes) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void modify(SSOToken token, String objName, ModificationItem[] mods) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void delete(SSOToken token, String objName) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public Set<String> searchSubOrgNames(SSOToken token, String dn, String filter, int numOfEntries,
+                boolean sortResults, boolean ascendingOrder, boolean recursive) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
             return null;
         }
-        public String getRootSuffix(){
+
+        @Override
+        public Set<String> searchOrganizationNames(SSOToken token, String dn, int numOfEntries, boolean sortResults,
+                boolean ascendingOrder, String serviceName, String attrName, Set values)
+                throws SMSException, SSOException {
+            // TODO Auto-generated method stub
             return null;
         }
-        public boolean entryExists(SSOToken token, String objName){
-            throw new RuntimeException("Not support");
+
+        @Override
+        public Set<String> subEntries(SSOToken token, String dn, String filter, int numOfEntries, boolean sortResults,
+                boolean ascendingOrder) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+            Set<String> ret = new HashSet<>();
+            ret.add("test mock");
+            return ret;
         }
-        public Set<String> searchSubOrgNames(SSOToken token, String dn,
-            String filter, int numOfEntries, boolean sortResults,
-            boolean ascendingOrder, boolean recursive) throws SMSException,
-            SSOException{
-            throw new RuntimeException("Not support");
+
+        @Override
+        public Set<String> schemaSubEntries(SSOToken token, String dn, String filter, String sidFilter,
+                int numOfEntries, boolean sortResults, boolean ascendingOrder) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+            return null;
         }
-        public Set<String> searchOrganizationNames(SSOToken token, String dn,
-            int numOfEntries, boolean sortResults, boolean ascendingOrder,
-            String serviceName, String attrName, Set values)
-            throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
+
+        @Override
+        public Set<String> search(SSOToken token, String startDN, String filter, int numOfEntries, int timeLimit,
+                boolean sortResults, boolean ascendingOrder) throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+            return null;
         }
-        public Set<String> subEntries(SSOToken token, String dn, String filter,
-            int numOfEntries, boolean sortResults, boolean ascendingOrder)
-            throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
+
+        @Override
+        public Iterator<SMSDataEntry> search(SSOToken token, String startDN, String filter, int numOfEntries,
+                int timeLimit, boolean sortResults, boolean ascendingOrder, Set<String> excludes)
+                throws SMSException, SSOException {
+            // TODO Auto-generated method stub
+            return null;
         }
-        public Set<String> schemaSubEntries(SSOToken token, String dn,
-            String filter, String sidFilter, int numOfEntries,
-            boolean sortResults, boolean ascendingOrder) throws SMSException,
-            SSOException{
-            throw new RuntimeException("Not support");
+
+        @Override
+        public boolean entryExists(SSOToken token, String objName) {
+            // TODO Auto-generated method stub
+            return false;
         }
-        public Set<String> search(SSOToken token, String startDN, String filter,
-            int numOfEntries, int timeLimit, boolean sortResults,
-            boolean ascendingOrder) throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
+
+        @Override
+        public String getRootSuffix() {
+            // TODO Auto-generated method stub
+            return null;
         }
-        public Iterator<SMSDataEntry> search(SSOToken token, String startDN,
-        String filter, int numOfEntries, int timeLimit, boolean sortResults,
-        boolean ascendingOrder, Set<String> excludes) throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
-        }
-        public Map<String, Set<String>> read(SSOToken token, String objName)
-            throws SMSException, SSOException{
-            return new Hashtable<>();
-        }
-        public void create(SSOToken token, String objName, Map attributes)
-            throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
-        }
-        public void modify(SSOToken token, String objName,
-            ModificationItem[] mods) throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
-        }
-        public void delete(SSOToken token, String objName)
-            throws SMSException, SSOException{
-            throw new RuntimeException("Not support");
+
+        @Override
+        public String getAMSdkBaseDN() {
+            // TODO Auto-generated method stub
+            return null;
         }
     }
 }
