@@ -110,8 +110,7 @@ public class OauthTest{
 
     }
 
-    @Test
-    public void processTest_LoginStart() throws Exception{
+    public LoginState processInit() throws Exception{
 
         //for AuthClientUtils
         System.setProperty("com.sun.identity.sm.sms_object_class_name",SMSObjectMock.class.getName());
@@ -129,9 +128,6 @@ public class OauthTest{
         PowerMockito.doNothing().when(ssoTokenManager).validateToken(any(SSOToken.class)); //.doNothing();
         PowerMockito.mockStatic(SSOTokenManager.class);
         PowerMockito.when(SSOTokenManager.getInstance()).thenReturn(ssoTokenManager);
-//        PowerMockito.mockStatic(SMSEntry.class);
-//        PowerMockito.when(SMSEntry.getRootSuffix()).thenReturn("/");
-        
 
         //for OAuth.process
         HashMap options = new HashMap<>();
@@ -148,11 +144,11 @@ public class OauthTest{
         options.put(OAuthParam.KEY_TOKEN_SERVICE, optionsValue);
         options.put(OAuthParam.KEY_PROFILE_SERVICE, optionsValue);
         options.put(OAuthParam.KEY_MAP_TO_ANONYMOUS_USER_FLAG, optionsValue);
+        final LoginState loginState = mock(LoginState.class);
         oauth.initialize(new Subject(),
             new CallbackHandler(){
                 public void handle(Callback[] callbacks){
                     LoginStateCallback loginStateCallback = (LoginStateCallback)callbacks[0];
-                    LoginState loginState = mock(LoginState.class);
                     when(loginState.getSession()).thenReturn(mock(InternalSession.class));
                     when(loginState.getHttpServletRequest()).thenReturn(mock(HttpServletRequest.class));
                     when(loginState.getHttpServletResponse()).thenReturn(mock(HttpServletResponse.class));
@@ -167,9 +163,28 @@ public class OauthTest{
         PowerMockito.when(SystemProperties.isServerMode()).thenReturn(true);
         PowerMockito.mockStatic(CachedSubEntries.class);
         PowerMockito.when(CachedSubEntries.getInstanceIfCached(any(SSOToken.class),any(String.class),any(boolean.class))).thenReturn(mock(CachedSubEntries.class));
+        return loginState;
+    }
 
+    @Test
+    public void processTest_LoginStart() throws Exception{
+        processInit();
         //Test
-        Assert.assertEquals(oauth.process(null,ISAuthConstants.LOGIN_START),100); //OAuthParam.GET_OAUTH_TOKEN_STATE);
+        Assert.assertEquals(oauth.process(new Callback[0],ISAuthConstants.LOGIN_START),OAuthParam.GET_OAUTH_TOKEN_STATE); 
+    }
+
+    @Test
+    public void processTest_OAuthTokenState_NO_CSRF() throws Exception{
+        LoginState loginState = processInit();
+        HttpServletRequest requestMock = loginState.getHttpServletRequest();
+        when(requestMock.getParameter(eq("code"))).thenReturn("code");
+        try{
+            //Test
+            Assert.assertEquals(oauth.process(new Callback[0],ISAuthConstants.LOGIN_START),0);
+            Assert.fail("failure");
+        }catch(AuthLoginException e){
+            Assert.assertEquals(e.getMessage(),"Authorization request failed because there was no state parameter");
+        }
     }
 
     @Test
